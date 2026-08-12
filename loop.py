@@ -7,6 +7,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from google import genai
 
+from context_builder import ContextBuilder
 from memory import EpisodicMemory, ProceduralMemory
 from sandbox import GitSandbox
 from verifier import Verifier
@@ -56,6 +57,7 @@ class CodeFixerAgent:
         error_trace: str,
         target_path: Path,
         test_path: Path,
+        codebase_context: str = "",
         history: list[dict] | None = None,
         episodic_memory_str: str = "",
         procedural_memory_str: str = "",
@@ -89,6 +91,8 @@ Do not include explanations, markdown fences, or changes to the test file.
 
 {episodic_memory_str}
 
+{codebase_context}
+
 Target file: {target_path.name}
 <target_code>
 {source_code}
@@ -108,8 +112,9 @@ Current failing test output:
 
 IMPORTANT:
 1. STRICTLY follow all guidelines in Procedural Memory.
-2. Do not repeat failed approaches from Working Memory.
-3. Return ONLY the corrected Python source inside <fixed_code> tags.
+2. Review imported helper modules in Codebase Context carefully to understand how data is sanitized/processed.
+3. Do not repeat failed approaches from Working Memory.
+4. Return ONLY the corrected Python source inside <fixed_code> tags.
 """
 
         response = self.client.models.generate_content(
@@ -130,7 +135,6 @@ def run_loop(
     episodic_memory = EpisodicMemory()
     procedural_memory = ProceduralMemory()
 
-    # Step 1: Initialize Git Worktree Sandbox
     sandbox = GitSandbox()
     try:
         sandbox_dir = sandbox.enter()
@@ -139,11 +143,11 @@ def run_loop(
         print(f"Failed to enter sandbox: {e}", file=sys.stderr)
         return 1
 
-    # Map paths inside the sandbox directory
     sandbox_target_path = sandbox_dir / target_file
     sandbox_test_dir = sandbox_dir / Path(target_file).parent
-    
-    # Run verifier explicitly inside the sandbox directory
+
+    # Initialize AST Context Builder on Sandbox codebase
+    context_builder = ContextBuilder(root_dir=sandbox_dir)
     verifier = Verifier(target_dir=str(sandbox_test_dir))
 
     attempt_history = []
@@ -155,7 +159,7 @@ def run_loop(
             result = verifier.run()
 
             if result.passed:
-                print(f" Tests passed on attempt {attempt} inside sandbox!")
+                print(f"✅ Tests passed on attempt {attempt} inside sandbox!")
                 success = True
                 break
 
@@ -171,6 +175,12 @@ def run_loop(
                 "error": result.error_trace,
             })
 
+            # Fetch multi-file import dependencies
+            codebase_context = context_builder.build_context_prompt(
+                target_file=sandbox_target_path,
+                test_file=sandbox_dir / test_file,
+            )
+
             episodic_str = episodic_memory.format_for_prompt()
             procedural_str = procedural_memory.get_rules()
 
@@ -178,6 +188,7 @@ def run_loop(
                 error_trace=result.error_trace,
                 target_path=sandbox_target_path,
                 test_path=sandbox_dir / test_file,
+                codebase_context=codebase_context,
                 history=attempt_history,
                 episodic_memory_str=episodic_str,
                 procedural_memory_str=procedural_str,
@@ -185,14 +196,20 @@ def run_loop(
 
             write_valid_python(sandbox_target_path, fixed_code)
 
-        # Final check if loop completed
         if not success:
             final_result = verifier.run()
             success = final_result.passed
 
         if success:
-            print(" Fix verified! Applying changes from sandbox to main codebase...")
-            sandbox.apply_to_main(target_file_rel=target_file)
+            commit_msg = (
+                f"fix(auto): repair {target_file} to pass unit tests\n\n"
+                f"Automated repair verified via pytest."
+            )
+            branch = sandbox.commit_and_merge(
+                target_file_rel=target_file,
+                commit_message=commit_msg,
+            )
+            print(f"🌿 Fix committed to new git branch: '{branch}'!")
 
             final_code = Path(target_file).read_text(encoding="utf-8")
             episodic_memory.save_successful_episode(
@@ -203,18 +220,19 @@ def run_loop(
             print(" Saved successful fix to store/episodes.json!")
             return 0
         else:
-            print(" Max attempts reached. Abandoning sandbox without touching main files.")
+            print(
+                " Max attempts reached. Abandoning sandbox without touching main files."
+            )
             return 1
 
     finally:
-        # Step 2: Always clean up sandbox directory and git branch
         sandbox.cleanup()
-        print(" Worktree sandbox cleaned up.")
+        print("🧹 Worktree sandbox cleaned up.")
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Repair target_app inside an isolated Git Sandbox using Gemini."
+        description="Repair multi-file target_app inside Git Sandbox using Gemini."
     )
     parser.add_argument("--target-file", default="target_app/calculator.py")
     parser.add_argument("--test-file", default="target_app/test_calculator.py")

@@ -26,5 +26,10 @@ def multiply(a: int, b: int) -> int:
     """
     return a * b
 
+from target_app.utils import sanitize_input
+
 def process_data(a, b):
-    return "bad_value"
+    # BUG: Doesn't handle ZeroDivisionError or format outputs
+    num_a = sanitize_input(a)
+    num_b = sanitize_input(b)
+    return num_a / num_b
