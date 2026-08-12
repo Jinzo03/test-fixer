@@ -15,28 +15,42 @@ class EpisodicMemory:
         except Exception:
             return []
 
-    def save_successful_episode(self, target_file: str, initial_error: str, final_code: str):
+    def save_successful_episode(
+        self, target_file: str, initial_error: str, solution_code: str
+    ) -> None:
         episodes = self.load_episodes()
-        episodes.append({
-            "target_file": target_file,
-            "initial_error": initial_error,
-            "solution_code": final_code
-        })
-        # Keep only the last 10 episodes to keep context clean
-        episodes = episodes[-10:]
-        self.memory_path.write_text(json.dumps(episodes, indent=2), encoding="utf-8")
+        episodes.append(
+            {
+                "target_file": target_file,
+                "initial_error": initial_error.strip(),
+                "solution_code": solution_code.strip(),
+            }
+        )
+        episodes = episodes[-5:]  # Keep latest 5 episodes
+        self.memory_path.write_text(
+            json.dumps(episodes, indent=2), encoding="utf-8"
+        )
 
     def format_for_prompt(self) -> str:
         episodes = self.load_episodes()
         if not episodes:
             return ""
 
-        formatted = "### Long-Term Episodic Memory (Past Successful Fixes in Other Files/Sessions):\n"
+        formatted = (
+            "### Long-Term Episodic Memory (Past Successful Fixes Across Sessions):\n"
+        )
         for idx, ep in enumerate(episodes, 1):
+            err_snippet = (
+                ep["initial_error"][:200] + "..."
+                if len(ep["initial_error"]) > 200
+                else ep["initial_error"]
+            )
             formatted += f"""
---- Past Fix #{idx} ---
-Error Context: {ep['initial_error'][:150]}...
-Working Solution Snippet:
+--- Episode #{idx} ({ep['target_file']}) ---
+Error Log Snippet:
+{err_snippet}
+
+Passed Fix Implemented:
 {ep['solution_code']}
 """
         return formatted

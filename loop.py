@@ -29,7 +29,6 @@ class CodeFixerAgent:
         self.model_name = model_name
 
     def extract_code(self, response_text: str) -> str:
-        """Extract corrected Python source from a model response."""
         if not response_text:
             raise ValueError("Gemini returned an empty response.")
 
@@ -38,7 +37,6 @@ class CodeFixerAgent:
             response_text,
             flags=re.DOTALL | re.IGNORECASE,
         )
-
         if tagged:
             return tagged.group(1).strip()
 
@@ -47,13 +45,11 @@ class CodeFixerAgent:
             response_text,
             flags=re.DOTALL | re.IGNORECASE,
         )
-
         if python_block:
             return python_block.group(1).strip()
 
         raise ValueError(
-            "Gemini response did not contain <fixed_code> tags "
-            "or a Python code block."
+            "Gemini response did not contain <fixed_code> tags or a Python block."
         )
 
     def generate_fix(
@@ -62,24 +58,22 @@ class CodeFixerAgent:
         target_file: str = "target_app/calculator.py",
         test_file: str = "target_app/test_calculator.py",
         history: list[dict] | None = None,
+        episodic_memory_str: str = "",
     ) -> str:
-
         target_path = Path(target_file)
         test_path = Path(test_file)
 
         source_code = target_path.read_text(encoding="utf-8")
         test_code = test_path.read_text(encoding="utf-8")
 
-        history_str = ""
-
+        working_memory_str = ""
         if history:
-            history_str = (
-                "### Previous Failed Attempts in This Session:\n"
+            working_memory_str = (
+                "### Working Memory (Previous Failed Attempts in THIS Current Run):\n"
             )
-
             for item in history:
-                history_str += f"""
---- Attempt #{item['attempt']} ---
+                working_memory_str += f"""
+--- Failed Attempt #{item['attempt']} ---
 Code Executed:
 {item['code']}
 
@@ -89,40 +83,34 @@ Error Produced:
 
         prompt = f"""You are an autonomous Python bug-fixing agent.
 
-A Python unit test suite is failing.
+Modify ONLY the target file so that all unit tests pass.
 
-Your task is to modify ONLY the target file so that all tests pass.
+Return the complete corrected contents of {target_file} inside <fixed_code> tags.
+Do not include explanations, markdown fences, or changes to the test file.
 
-Return the complete corrected contents of {target_file}
-inside <fixed_code> tags.
-
-Do not include explanations.
-Do not include markdown fences.
-Do not modify the test file.
+{episodic_memory_str}
 
 Target file: {target_file}
-
 <target_code>
 {source_code}
 </target_code>
 
 Test file: {test_file}
-
 <test_code>
 {test_code}
 </test_code>
 
-Failing test output:
-
+Current failing test output:
 <error_trace>
 {error_trace}
 </error_trace>
 
-{history_str}
+{working_memory_str}
 
 IMPORTANT:
-Do not repeat failed approaches from previous attempts.
-Return ONLY the corrected Python source inside <fixed_code> tags.
+1. Do not repeat failed approaches from the current session's working memory.
+2. Use relevant patterns from long-term episodic memory if applicable.
+3. Return ONLY the corrected Python source inside <fixed_code> tags.
 """
 
         response = self.client.models.generate_content(
@@ -138,32 +126,38 @@ def run_loop(
     test_file: str = "target_app/test_calculator.py",
     max_attempts: int = 3,
     model_name: str = "gemini-2.5-flash",
-    memory: EpisodicMemory | None = None,
 ) -> int:
-
     verifier = Verifier()
     agent = CodeFixerAgent(model_name=model_name)
+    episodic_memory = EpisodicMemory()
 
     target_path = Path(target_file)
-
     attempt_history = []
+    initial_error_log = ""
 
     for attempt in range(1, max_attempts + 1):
-
         result = verifier.run()
 
         if result.passed:
-            print(f"Tests passed on attempt {attempt}!")
+            print(f" Tests passed on attempt {attempt}!")
             print(result.output)
+            
+            # Save successful resolution to Episodic Memory
+            final_code = target_path.read_text(encoding="utf-8")
+            episodic_memory.save_successful_episode(
+                target_file=target_file,
+                initial_error=initial_error_log or "Initial test failure",
+                solution_code=final_code,
+            )
+            print(" Saved successful fix to store/episodes.json!")
             return 0
 
-        print(
-            f"Attempt {attempt} failed. "
-            "Generating a fix with Gemini..."
-        )
+        print(f"Attempt {attempt} failed. Generating a fix with Gemini...")
+        
+        if attempt == 1:
+            initial_error_log = result.error_trace
 
         try:
-            # Save the code that ACTUALLY produced this failure.
             current_code = target_path.read_text(encoding="utf-8")
 
             attempt_history.append({
@@ -172,28 +166,32 @@ def run_loop(
                 "error": result.error_trace,
             })
 
+            # Fetch long-term memory string from JSON disk storage
+            episodic_str = episodic_memory.format_for_prompt()
+
             fixed_code = agent.generate_fix(
                 error_trace=result.error_trace,
                 target_file=target_file,
                 test_file=test_file,
                 history=attempt_history,
+                episodic_memory_str=episodic_str,
             )
 
             write_valid_python(target_path, fixed_code)
 
         except Exception as exc:
-            print(
-                f"Could not generate/apply fix: {exc}",
-                file=sys.stderr,
-            )
+            print(f"Could not generate/apply fix: {exc}", file=sys.stderr)
             return 1
 
-    # Test the final generated code.
     final_result = verifier.run()
-
     if final_result.passed:
-        print("Final generated fix passed!")
-        print(final_result.output)
+        final_code = target_path.read_text(encoding="utf-8")
+        episodic_memory.save_successful_episode(
+            target_file=target_file,
+            initial_error=initial_error_log,
+            solution_code=final_code,
+        )
+        print("💾 Saved successful fix to store/episodes.json!")
         return 0
 
     print(final_result.output or final_result.error_trace)
@@ -204,37 +202,17 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Repair target_app with Gemini until pytest passes."
     )
-
-    parser.add_argument(
-        "--target-file",
-        default="target_app/calculator.py",
-    )
-
-    parser.add_argument(
-        "--test-file",
-        default="target_app/test_calculator.py",
-    )
-
-    parser.add_argument(
-        "--max-attempts",
-        type=int,
-        default=3,
-    )
-
-    parser.add_argument(
-        "--model",
-        default="gemini-2.5-flash",
-    )
-
+    parser.add_argument("--target-file", default="target_app/calculator.py")
+    parser.add_argument("--test-file", default="target_app/test_calculator.py")
+    parser.add_argument("--max-attempts", type=int, default=3)
+    parser.add_argument("--model", default="gemini-2.5-flash")
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-
     raise SystemExit(
         run_loop(
-            memory=EpisodicMemory(),
             target_file=args.target_file,
             test_file=args.test_file,
             max_attempts=args.max_attempts,
