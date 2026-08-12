@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 from google import genai
 
 from memory import EpisodicMemory, ProceduralMemory
+from sandbox import GitSandbox
 from verifier import Verifier
 
 
@@ -53,15 +54,12 @@ class CodeFixerAgent:
     def generate_fix(
         self,
         error_trace: str,
-        target_file: str = "target_app/calculator.py",
-        test_file: str = "target_app/test_calculator.py",
+        target_path: Path,
+        test_path: Path,
         history: list[dict] | None = None,
         episodic_memory_str: str = "",
         procedural_memory_str: str = "",
     ) -> str:
-        target_path = Path(target_file)
-        test_path = Path(test_file)
-
         source_code = target_path.read_text(encoding="utf-8")
         test_code = test_path.read_text(encoding="utf-8")
 
@@ -84,19 +82,19 @@ Error Produced:
 
 Modify ONLY the target file so that all unit tests pass.
 
-Return the complete corrected contents of {target_file} inside <fixed_code> tags.
+Return the complete corrected contents inside <fixed_code> tags.
 Do not include explanations, markdown fences, or changes to the test file.
 
 {procedural_memory_str}
 
 {episodic_memory_str}
 
-Target file: {target_file}
+Target file: {target_path.name}
 <target_code>
 {source_code}
 </target_code>
 
-Test file: {test_file}
+Test file: {test_path.name}
 <test_code>
 {test_code}
 </test_code>
@@ -128,31 +126,45 @@ def run_loop(
     max_attempts: int = 3,
     model_name: str = "gemini-2.5-flash",
 ) -> int:
-    verifier = Verifier()
     agent = CodeFixerAgent(model_name=model_name)
     episodic_memory = EpisodicMemory()
     procedural_memory = ProceduralMemory()
 
-    target_path = Path(target_file)
+    # Step 1: Initialize Git Worktree Sandbox
+    sandbox = GitSandbox()
+    try:
+        sandbox_dir = sandbox.enter()
+        print(f" Isolated sandbox created at: {sandbox_dir}")
+    except Exception as e:
+        print(f"Failed to enter sandbox: {e}", file=sys.stderr)
+        return 1
+
+    # Map paths inside the sandbox directory
+    sandbox_target_path = sandbox_dir / target_file
+    sandbox_test_dir = sandbox_dir / Path(target_file).parent
+    
+    # Run verifier explicitly inside the sandbox directory
+    verifier = Verifier(target_dir=str(sandbox_test_dir))
+
     attempt_history = []
     initial_error_log = ""
+    success = False
 
-    for attempt in range(1, max_attempts + 1):
-        result = verifier.run()
+    try:
+        for attempt in range(1, max_attempts + 1):
+            result = verifier.run()
 
-        if result.passed:
-            print(f" Tests passed on attempt {attempt}!")
-            print(result.output)
-            return 0
+            if result.passed:
+                print(f" Tests passed on attempt {attempt} inside sandbox!")
+                success = True
+                break
 
-        print(f"Attempt {attempt} failed. Generating a fix with Gemini...")
+            print(f"Attempt {attempt} failed inside sandbox. Retrying...")
 
-        if attempt == 1:
-            initial_error_log = result.error_trace
+            if attempt == 1:
+                initial_error_log = result.error_trace
 
-        try:
-            current_code = target_path.read_text(encoding="utf-8")
-
+            current_code = sandbox_target_path.read_text(encoding="utf-8")
             attempt_history.append({
                 "attempt": attempt,
                 "code": current_code,
@@ -164,37 +176,45 @@ def run_loop(
 
             fixed_code = agent.generate_fix(
                 error_trace=result.error_trace,
-                target_file=target_file,
-                test_file=test_file,
+                target_path=sandbox_target_path,
+                test_path=sandbox_dir / test_file,
                 history=attempt_history,
                 episodic_memory_str=episodic_str,
                 procedural_memory_str=procedural_str,
             )
 
-            write_valid_python(target_path, fixed_code)
+            write_valid_python(sandbox_target_path, fixed_code)
 
-        except Exception as exc:
-            print(f"Could not generate/apply fix: {exc}", file=sys.stderr)
+        # Final check if loop completed
+        if not success:
+            final_result = verifier.run()
+            success = final_result.passed
+
+        if success:
+            print(" Fix verified! Applying changes from sandbox to main codebase...")
+            sandbox.apply_to_main(target_file_rel=target_file)
+
+            final_code = Path(target_file).read_text(encoding="utf-8")
+            episodic_memory.save_successful_episode(
+                target_file=target_file,
+                initial_error=initial_error_log or "Initial failure",
+                solution_code=final_code,
+            )
+            print(" Saved successful fix to store/episodes.json!")
+            return 0
+        else:
+            print(" Max attempts reached. Abandoning sandbox without touching main files.")
             return 1
 
-    final_result = verifier.run()
-    if final_result.passed:
-        final_code = target_path.read_text(encoding="utf-8")
-        episodic_memory.save_successful_episode(
-            target_file=target_file,
-            initial_error=initial_error_log,
-            solution_code=final_code,
-        )
-        print(" Saved successful fix to store/episodes.json!")
-        return 0
-
-    print(final_result.output or final_result.error_trace)
-    return 1
+    finally:
+        # Step 2: Always clean up sandbox directory and git branch
+        sandbox.cleanup()
+        print(" Worktree sandbox cleaned up.")
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Repair target_app with Gemini until pytest passes."
+        description="Repair target_app inside an isolated Git Sandbox using Gemini."
     )
     parser.add_argument("--target-file", default="target_app/calculator.py")
     parser.add_argument("--test-file", default="target_app/test_calculator.py")
