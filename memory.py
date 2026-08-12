@@ -2,7 +2,22 @@ import json
 from pathlib import Path
 
 
+class ProceduralMemory:
+    """Handles static guidelines, rules, and repository conventions."""
+
+    def __init__(self, skill_file: str = "store/SKILL.md"):
+        self.skill_path = Path(skill_file)
+
+    def get_rules(self) -> str:
+        if not self.skill_path.exists():
+            return ""
+        rules = self.skill_path.read_text(encoding="utf-8").strip()
+        if not rules:
+            return ""
+        return f"### Procedural Memory & Repo Rules ({self.skill_path.name}):\n{rules}\n"
 class EpisodicMemory:
+    """Handles historical run outcomes persisted across sessions."""
+
     def __init__(self, memory_file: str = "store/episodes.json"):
         self.memory_path = Path(memory_file)
         self.memory_path.parent.mkdir(parents=True, exist_ok=True)
@@ -26,7 +41,7 @@ class EpisodicMemory:
                 "solution_code": solution_code.strip(),
             }
         )
-        episodes = episodes[-5:]  # Keep latest 5 episodes
+        episodes = episodes[-5:]
         self.memory_path.write_text(
             json.dumps(episodes, indent=2), encoding="utf-8"
         )

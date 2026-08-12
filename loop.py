@@ -7,12 +7,11 @@ from pathlib import Path
 from dotenv import load_dotenv
 from google import genai
 
-from memory import EpisodicMemory
+from memory import EpisodicMemory, ProceduralMemory
 from verifier import Verifier
 
 
 def write_valid_python(path: Path, code: str) -> None:
-    """Validate Python syntax before replacing the target file."""
     compile(code, str(path), "exec")
     path.write_text(code, encoding="utf-8")
 
@@ -20,7 +19,6 @@ def write_valid_python(path: Path, code: str) -> None:
 class CodeFixerAgent:
     def __init__(self, model_name: str = "gemini-2.5-flash"):
         load_dotenv()
-
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
             raise RuntimeError("GEMINI_API_KEY is not set.")
@@ -59,6 +57,7 @@ class CodeFixerAgent:
         test_file: str = "target_app/test_calculator.py",
         history: list[dict] | None = None,
         episodic_memory_str: str = "",
+        procedural_memory_str: str = "",
     ) -> str:
         target_path = Path(target_file)
         test_path = Path(test_file)
@@ -88,6 +87,8 @@ Modify ONLY the target file so that all unit tests pass.
 Return the complete corrected contents of {target_file} inside <fixed_code> tags.
 Do not include explanations, markdown fences, or changes to the test file.
 
+{procedural_memory_str}
+
 {episodic_memory_str}
 
 Target file: {target_file}
@@ -108,8 +109,8 @@ Current failing test output:
 {working_memory_str}
 
 IMPORTANT:
-1. Do not repeat failed approaches from the current session's working memory.
-2. Use relevant patterns from long-term episodic memory if applicable.
+1. STRICTLY follow all guidelines in Procedural Memory.
+2. Do not repeat failed approaches from Working Memory.
 3. Return ONLY the corrected Python source inside <fixed_code> tags.
 """
 
@@ -130,6 +131,7 @@ def run_loop(
     verifier = Verifier()
     agent = CodeFixerAgent(model_name=model_name)
     episodic_memory = EpisodicMemory()
+    procedural_memory = ProceduralMemory()
 
     target_path = Path(target_file)
     attempt_history = []
@@ -141,19 +143,10 @@ def run_loop(
         if result.passed:
             print(f" Tests passed on attempt {attempt}!")
             print(result.output)
-            
-            # Save successful resolution to Episodic Memory
-            final_code = target_path.read_text(encoding="utf-8")
-            episodic_memory.save_successful_episode(
-                target_file=target_file,
-                initial_error=initial_error_log or "Initial test failure",
-                solution_code=final_code,
-            )
-            print(" Saved successful fix to store/episodes.json!")
             return 0
 
         print(f"Attempt {attempt} failed. Generating a fix with Gemini...")
-        
+
         if attempt == 1:
             initial_error_log = result.error_trace
 
@@ -166,8 +159,8 @@ def run_loop(
                 "error": result.error_trace,
             })
 
-            # Fetch long-term memory string from JSON disk storage
             episodic_str = episodic_memory.format_for_prompt()
+            procedural_str = procedural_memory.get_rules()
 
             fixed_code = agent.generate_fix(
                 error_trace=result.error_trace,
@@ -175,6 +168,7 @@ def run_loop(
                 test_file=test_file,
                 history=attempt_history,
                 episodic_memory_str=episodic_str,
+                procedural_memory_str=procedural_str,
             )
 
             write_valid_python(target_path, fixed_code)
@@ -191,7 +185,7 @@ def run_loop(
             initial_error=initial_error_log,
             solution_code=final_code,
         )
-        print("💾 Saved successful fix to store/episodes.json!")
+        print(" Saved successful fix to store/episodes.json!")
         return 0
 
     print(final_result.output or final_result.error_trace)

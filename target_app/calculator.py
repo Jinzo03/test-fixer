@@ -1,13 +1,44 @@
-import math
-
+from typing import Union
 
 def add(a: int, b: int) -> int:
-    return a // b
+    """
+    Adds two integers and returns their sum.
+
+    Args:
+        a: The first integer.
+        b: The second integer.
+
+    Returns:
+        The sum of the two integers.
+    """
+    return a + b
 
 def multiply(a: int, b: int) -> int:
+    """
+    Multiplies two integers and returns their product.
+
+    Args:
+        a: The first integer.
+        b: The second integer.
+
+    Returns:
+        The product of the two integers.
+    """
     return a * b
 
-def process_data(a, b):
+def process_data(a: Union[int, float, str], b: Union[int, float, str]) -> float:
+    """
+    Processes two inputs, performing division after converting them to floats.
+    Handles string inputs, zero division, and rounds the result to two decimal places.
+
+    Args:
+        a: The numerator, which can be an int, float, or string representation of a number.
+        b: The denominator, which can be an int, float, or string representation of a number.
+
+    Returns:
+        The result of the division, rounded to two decimal places.
+        Returns 0.0 if the denominator is zero or if inputs cannot be converted to numbers.
+    """
     try:
         # Cast inputs to float to handle string inputs and ensure float division
         num_a = float(a)
