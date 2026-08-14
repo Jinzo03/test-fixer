@@ -3,8 +3,10 @@ from curator import KnowledgeCurator
 
 def main():
     curator = KnowledgeCurator()
+    
+    # Wipe old test vectors so we get a clean run
+    curator.vector_store.clear()
 
-    # Adversarial document containing 2 true claims, 1 wild exaggeration, and 1 complete hallucination/lie
     adversarial_doc = """
     In a groundbreaking paper published by QuantumTech Labs, researchers demonstrated a 15% increase 
     in qubit coherence time using niobium-based superconducting circuits at 15 millikelvin. 

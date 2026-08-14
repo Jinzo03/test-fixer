@@ -1,8 +1,8 @@
 import json
 import os
-import re
 from dotenv import load_dotenv
 from google import genai
+from google.genai import types
 
 
 class ClaimVerifier:
@@ -20,11 +20,9 @@ class ClaimVerifier:
     def verify_claims(
         self, source_text: str, claims: list[dict[str, str]]
     ) -> list[dict[str, str]]:
-        """Filters claims using numeric ID mapping and strict epistemic verification."""
         if not claims:
             return []
 
-        # Assign numeric IDs to claims for robust tracking
         indexed_claims = [
             {
                 "id": idx,
@@ -34,74 +32,72 @@ class ClaimVerifier:
             for idx, item in enumerate(claims, 1)
         ]
 
-        claims_json = json.dumps(indexed_claims, indent=2)
+        system_instruction = """You are a ruthless scientific peer-reviewer and fact-checker.
+Audit each claim against the source text to determine if it represents CONFIRMED, VALIDATED TRUTH according to the research authors.
 
-        prompt = f"""You are a strict scientific peer-reviewer and fact checker.
+STRICT AUDIT RULES:
+1. REJECT ("verified": false) any claim stemming from media hype, unverified rumors, or blog speculation (e.g., "cracking RSA encryption in 3 seconds", "wormhole created in a sink").
+2. REJECT ("verified": false) any claim that the text explicitly refutes, clarifies as false, or states is impossible with current prototype limits.
+3. APPROVE ("verified": true) ONLY claims that represent verified, true facts or direct experimental results achieved by the researchers.
+"""
 
-Audit each extracted claim against the raw source text to verify if the claim represents TRUE, VALIDATED SCIENTIFIC FACT according to the text.
-
-AUDIT RULES:
-1. REJECT ("verified": false) any claim that is a blog hype exaggeration, unverified rumor, or false speculation (e.g., "cracking RSA encryption in 3 seconds" or "created a wormhole in the sink").
-2. REJECT ("verified": false) any claim that the source text explicitly refutes, clarifies as false, or states is impossible/unproven with current hardware.
-3. APPROVE ("verified": true) ONLY claims that represent true, confirmed facts or actual experimental results achieved by the researchers.
-
-Input Claims to Audit:
-<claims>
-{claims_json}
-</claims>
+        prompt = f"""Claims to Audit:
+{json.dumps(indexed_claims, indent=2)}
 
 Raw Source Document:
-<source>
 {source_text}
-</source>
-
-Return a JSON array of objects inside <verification> tags.
-Each item MUST include:
-- "id": integer (matching the claim input id)
-- "verified": boolean
-- "reason": string (short justification)
 """
+
+        schema = {
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "id": {"type": "INTEGER"},
+                    "verified": {"type": "BOOLEAN"},
+                    "reason": {"type": "STRING"},
+                },
+                "required": ["id", "verified", "reason"],
+            },
+        }
+
         response = self.client.models.generate_content(
             model=self.model_name,
             contents=prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=system_instruction,
+                response_mime_type="application/json",
+                response_schema=schema,
+            ),
         )
 
-        return self._filter_verified(response.text or "", claims)
+        return self._filter_verified(response.text or "[]", claims)
 
     def _filter_verified(
         self, response_text: str, original_claims: list[dict[str, str]]
     ) -> list[dict[str, str]]:
-        match = re.search(
-            r"<verification>\s*(.*?)\s*</verification>",
-            response_text,
-            flags=re.DOTALL,
-        )
-        raw_json = match.group(1).strip() if match else response_text.strip()
-
-        raw_json = re.sub(r"^```(?:json)?\s*", "", raw_json, flags=re.MULTILINE)
-        raw_json = re.sub(r"\s*```$", "", raw_json, flags=re.MULTILINE)
-
         try:
-            audit_results = json.loads(raw_json)
-            # Map results by integer ID
+            audit_results = json.loads(response_text)
             audit_map = {int(item["id"]): item for item in audit_results if "id" in item}
 
             verified_claims = []
+            print("\n--- 🛡️ Verifier Audit Detailed Report ---")
+
             for idx, claim_obj in enumerate(original_claims, 1):
                 audit_entry = audit_map.get(idx)
+                is_verified = audit_entry.get("verified", False) if audit_entry else False
+                reason = audit_entry.get("reason", "No audit record") if audit_entry else "No audit record"
 
-                if audit_entry and audit_entry.get("verified", False):
+                if is_verified:
+                    print(f" APPROVED [Claim #{idx}]: '{claim_obj['claim']}'")
+                    print(f"   └── Reason: {reason}")
                     verified_claims.append(claim_obj)
                 else:
-                    reason = (
-                        audit_entry.get("reason", "Failed verification")
-                        if audit_entry
-                        else "No audit record"
-                    )
-                    print(f" Claim Rejected by Verifier: '{claim_obj['claim']}'")
+                    print(f" REJECTED [Claim #{idx}]: '{claim_obj['claim']}'")
                     print(f"   └── Reason: {reason}")
 
+            print("-------------------------------------------\n")
             return verified_claims
         except Exception as exc:
-            print(f" Verification parsing failed: {exc}")
+            print(f"⚠️ Verification parsing failed: {exc}")
             return []

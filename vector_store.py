@@ -91,3 +91,6 @@ class SemanticMemory:
         # Sort descending by similarity score
         results.sort(key=lambda x: x["similarity"], reverse=True)
         return results[:top_k]
+    def clear(self) -> None:
+        """Wipes all saved vectors in memory for testing/reset."""
+        self.memory_path.write_text("[]", encoding="utf-8")
