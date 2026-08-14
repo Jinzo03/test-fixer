@@ -159,7 +159,7 @@ def run_loop(
             result = verifier.run()
 
             if result.passed:
-                print(f"✅ Tests passed on attempt {attempt} inside sandbox!")
+                print(f" Tests passed on attempt {attempt} inside sandbox!")
                 success = True
                 break
 
@@ -209,7 +209,7 @@ def run_loop(
                 target_file_rel=target_file,
                 commit_message=commit_msg,
             )
-            print(f"🌿 Fix committed to new git branch: '{branch}'!")
+            print(f" Fix committed to new git branch: '{branch}'!")
 
             final_code = Path(target_file).read_text(encoding="utf-8")
             episodic_memory.save_successful_episode(
@@ -227,7 +227,7 @@ def run_loop(
 
     finally:
         sandbox.cleanup()
-        print("🧹 Worktree sandbox cleaned up.")
+        print(" Worktree sandbox cleaned up.")
 
 
 def parse_args() -> argparse.Namespace:
